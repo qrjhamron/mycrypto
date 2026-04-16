@@ -1,0 +1,210 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# mycrypto Configuration File
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Copy this file to config.toml and customize as needed.
+# Values prefixed with ENV: will be resolved from environment variables.
+#
+# IMPORTANT: Never commit real API keys. Use environment variables.
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Agent Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+[agent]
+# Status: "running" or "paused"
+# When paused, the agent stops generating signals but still tracks positions
+status = "running"
+
+# Minimum confidence score (0-100) required to execute a signal
+# Signals below this threshold are marked as "Skip" or "Watch"
+min_confidence = 70
+
+# Maximum number of positions the agent can hold simultaneously
+max_open_trades = 3
+
+# How often the signal engine analyzes the market (in seconds)
+# Minimum is 60 seconds to avoid excessive API calls
+scan_interval_sec = 300
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Portfolio Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+[portfolio]
+# Starting virtual balance for paper trading
+virtual_balance = 10000.0
+
+# Quote currency (what your balance is denominated in)
+currency = "USDT"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Risk Management
+# ──────────────────────────────────────────────────────────────────────────────
+[risk]
+# Percentage of portfolio to risk per trade
+# Example: 1.5 means you risk 1.5% of total portfolio value on each trade
+risk_per_trade_pct = 1.5
+
+# Maximum percentage of portfolio that can be in a single position
+max_position_pct = 20.0
+
+# If daily losses exceed this percentage, the agent auto-pauses
+# Set to 100 to effectively disable
+max_daily_drawdown_pct = 5.0
+
+# Minimum risk/reward ratio required to execute a trade
+# Example: 2.0 means potential profit must be 2x potential loss
+min_risk_reward = 2.0
+
+# Enable trailing stop loss
+# When enabled, stop loss moves up as price moves in your favor
+trailing_stop_enabled = false
+
+# Trailing stop distance as percentage of current price
+trailing_stop_pct = 1.0
+
+# Funding rate threshold (% per 8h)
+# Pairs with funding rates above this are blacklisted
+# High funding rates often precede reversals
+funding_rate_threshold = 0.05
+
+# Drawdown ceiling for signal engine circuit checks
+max_drawdown_pct = 5.0
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Production Signal Engine
+# ──────────────────────────────────────────────────────────────────────────────
+[engine]
+# Enable/disable scheduler
+enabled = true
+
+# Tick cadence (seconds)
+tick_interval_secs = 30
+
+# Confluence threshold from 0.0 to 1.0
+min_confidence = 0.65
+
+# Timeframe used by technical stage (Binance interval format)
+timeframe = "5m"
+
+# Max total portfolio exposure allowed for open positions
+total_exposure_limit_pct = 80.0
+
+# Correlation threshold for blocking same-direction correlated assets
+correlation_threshold = 0.80
+
+[engine.weights]
+ema_crossover = 1.5
+rsi = 1.2
+macd = 1.3
+bb = 1.0
+atr_regime = 0.8
+vwap = 1.0
+volume_anomaly = 1.1
+sentiment = 1.4
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Trading Pairs
+# ──────────────────────────────────────────────────────────────────────────────
+[pairs]
+# Pairs to actively monitor and trade
+# These should be valid Binance perpetual futures symbols
+watchlist = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+]
+
+# Pairs to explicitly exclude (even if they appear elsewhere)
+# Useful for temporarily disabling a pair without removing from watchlist
+blacklist = []
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Market Data Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+[data]
+# Binance WebSocket URL for market data streams
+# No API key required for public market data
+binance_ws_url = "wss://stream.binance.com:9443/stream"
+
+# Number of candles to keep in memory per pair/timeframe
+# Higher values use more memory but enable longer-term analysis
+cache_candles = 200
+
+# External source toggles
+yahoo_enabled = true
+coingecko_enabled = true
+fear_greed_enabled = true
+reddit_enabled = true
+twitter_enabled = true
+reuters_rss_enabled = true
+bloomberg_rss_enabled = true
+finnhub_enabled = true
+cryptopanic_enabled = true
+newsdata_enabled = true
+
+# Source cache TTLs (minutes)
+yahoo_ttl_minutes = 15
+coingecko_ttl_minutes = 5
+fear_greed_ttl_minutes = 10
+reddit_ttl_minutes = 10
+twitter_ttl_minutes = 5
+rss_ttl_minutes = 15
+finnhub_ttl_minutes = 15
+cryptopanic_ttl_minutes = 10
+newsdata_ttl_minutes = 10
+
+# Background polling interval for non-WS sources (seconds)
+sources_poll_interval_sec = 60
+
+# ──────────────────────────────────────────────────────────────────────────────
+# LLM Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+[llm]
+# Provider: "claude", "openai", "ollama", or "mock"
+# Use "mock" for testing without API calls
+provider = "claude"
+
+# Model identifier
+# For Claude: claude-opus-4-5, claude-sonnet-4-20250514, etc.
+# For OpenAI: gpt-4, gpt-3.5-turbo, etc.
+model = "claude-opus-4-5"
+
+# API key - use ENV: prefix to read from environment variable
+# NEVER put actual keys in this file
+api_key = "ENV:CLAUDE_API_KEY"
+
+# Enable streaming responses (recommended for better UX)
+stream = true
+
+# Maximum tokens in LLM response
+max_tokens = 1024
+
+# Number of chat messages to keep in context window
+# Higher values give more context but use more tokens
+context_messages = 20
+
+# Optional: Base URL for self-hosted models (Ollama, etc.)
+# base_url = "http://localhost:11434"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# TUI Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+[tui]
+# How often to refresh the display (milliseconds)
+# Lower values are smoother but use more CPU
+refresh_rate_ms = 500
+
+# Color theme: currently only "dark" is supported
+theme = "dark"
+
+# Left panel width as percentage (1-100)
+# The right panel (chat) gets the remaining space
+split_ratio = 50
+
+# Number of log entries to keep in buffer
+log_lines = 200
+
+# Default chart timeframe when opening /chart
+# Supported: "1h", "4h", "1d", "1w"
+chart_default_timeframe = "4h"

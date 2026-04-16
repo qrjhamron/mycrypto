@@ -1,0 +1,85 @@
+[package]
+name = "mycrypto"
+version = "0.1.0"
+edition = "2021"
+authors = ["mycrypto team"]
+description = "AI-powered crypto paper trading companion for the terminal"
+license = "MIT"
+repository = "https://github.com/mycrypto/mycrypto"
+keywords = ["crypto", "trading", "tui", "ai", "paper-trading"]
+categories = ["command-line-utilities", "finance"]
+
+[[bin]]
+name = "mycrypto"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime - full features for fs, net, time, sync, macros
+tokio = { version = "1", features = ["full"] }
+
+# Terminal UI
+ratatui = "0.28"
+crossterm = "0.28"
+
+# WebSocket for market data streams
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util = "0.3"
+
+# HTTP client for LLM API and sentiment data
+reqwest = { version = "0.12", features = ["json", "stream", "native-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling - thiserror for library, anyhow only in main.rs
+thiserror = "1"
+anyhow = "1"
+
+# Environment variables
+dotenvy = "0.15"
+
+# Time handling with serde support
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging - file-based, never stdout (TUI owns terminal)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
+
+# Precise decimal arithmetic for financial calculations
+rust_decimal = { version = "1", features = ["serde-float"] }
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive"] }
+
+# Unique identifiers for trades and signals
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Async trait helpers
+async-trait = "0.1"
+
+# Bytes handling for streaming
+bytes = "1"
+
+# RSS parsing for Reuters/Bloomberg feeds
+rss = "2"
+
+[features]
+default = []
+# Future optional modules behind feature flags
+sentiment = []      # Fear & Greed index, social sentiment
+onchain = []        # On-chain analytics
+advanced-ta = []    # Advanced technical indicators
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+# Faster compile times during development
+opt-level = 0
+debug = true

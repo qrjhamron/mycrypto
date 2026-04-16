@@ -1,0 +1,17 @@
+target/
+
+# Local environment and secrets
+.env
+config.toml
+
+# Runtime/log output
+*.log
+logs/
+.mycrypto/
+
+# IDE/editor
+.idea/
+.vscode/
+
+# OS junk
+.DS_Store
