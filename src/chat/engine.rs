@@ -4,7 +4,7 @@
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config::LlmConfig;
 use crate::error::Result;
@@ -63,6 +63,7 @@ impl ChatEngine {
         user_input: &str,
     ) -> Result<mpsc::Receiver<ChatEvent>> {
         let (tx, rx) = mpsc::channel(100);
+        let provider_name = self.provider.name().to_string();
 
         // Build messages with context
         let messages = build_messages(state, user_input);
@@ -78,32 +79,22 @@ impl ChatEngine {
         tokio::spawn(async move {
             let mut buffer = StreamBuffer::new();
             let mut stream = stream;
+            let mut stream_ended_with_error = false;
+            let mut saw_explicit_final_token = false;
+
+            debug!(provider = %provider_name, "Chat stream started");
 
             while let Some(result) = stream.next().await {
                 match result {
                     Ok(token) => {
+                        debug!(
+                            is_final = token.is_final,
+                            token_len = token.text.len(),
+                            "Chat token received"
+                        );
+
                         if token.is_final {
-                            // Stream complete, parse for commands
-                            let parsed = buffer.finalize();
-
-                            // Send complete event
-                            let _ = tx_clone
-                                .send(ChatEvent::Complete(parsed.display_text.clone()))
-                                .await;
-
-                            // Execute any detected commands
-                            // Note: We can't mutate state here, commands will be
-                            // returned for the caller to execute
-                            for intent in parsed.intents {
-                                let _ = tx_clone
-                                    .send(ChatEvent::CommandExecuted(CommandResult::success(
-                                        format!(
-                                            "Command detected: {} {:?}",
-                                            intent.command, intent.argument
-                                        ),
-                                    )))
-                                    .await;
-                            }
+                            saw_explicit_final_token = true;
 
                             break;
                         } else {
@@ -121,8 +112,38 @@ impl ChatEngine {
                     Err(e) => {
                         error!("Streaming error: {}", e);
                         let _ = tx_clone.send(ChatEvent::Error(e.to_string())).await;
+                        stream_ended_with_error = true;
                         break;
                     }
+                }
+            }
+
+            if !stream_ended_with_error {
+                let parsed = buffer.finalize();
+                let display_text = parsed.display_text.clone();
+                let path = if saw_explicit_final_token {
+                    "explicit-final-token"
+                } else {
+                    "stream-eof"
+                };
+
+                debug!(
+                    path,
+                    display_len = display_text.len(),
+                    intent_count = parsed.intents.len(),
+                    "Finalizing chat stream"
+                );
+
+                let _ = tx_clone.send(ChatEvent::Complete(display_text)).await;
+                debug!("Chat complete event dispatched");
+
+                for intent in parsed.intents {
+                    let _ = tx_clone
+                        .send(ChatEvent::CommandExecuted(CommandResult::success(format!(
+                            "Command detected: {} {:?}",
+                            intent.command, intent.argument
+                        ))))
+                        .await;
                 }
             }
         });
@@ -237,6 +258,7 @@ mod tests {
 
     use async_trait::async_trait;
     use futures_util::stream;
+    use tokio::sync::mpsc;
 
     use super::*;
     use crate::chat::llm::{LlmProvider, Message, Token, TokenStream};
@@ -245,6 +267,10 @@ mod tests {
     struct RecordingProvider {
         recorded_messages: Arc<Mutex<Vec<Message>>>,
     }
+
+    struct NoFinalTokenProvider;
+
+    struct ErrorAfterTokenProvider;
 
     #[async_trait]
     impl LlmProvider for RecordingProvider {
@@ -277,6 +303,65 @@ mod tests {
                 Ok(Token::final_token("stop")),
             ])))
         }
+    }
+
+    #[async_trait]
+    impl LlmProvider for NoFinalTokenProvider {
+        fn name(&self) -> &str {
+            "no-final"
+        }
+
+        fn validate_config(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn has_credentials(&self) -> bool {
+            true
+        }
+
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _config: &LlmConfig,
+        ) -> Result<TokenStream> {
+            Ok(Box::pin(stream::iter(vec![Ok(Token::new("hello"))])))
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for ErrorAfterTokenProvider {
+        fn name(&self) -> &str {
+            "error-after-token"
+        }
+
+        fn validate_config(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn has_credentials(&self) -> bool {
+            true
+        }
+
+        async fn stream_completion(
+            &self,
+            _messages: Vec<Message>,
+            _config: &LlmConfig,
+        ) -> Result<TokenStream> {
+            Ok(Box::pin(stream::iter(vec![
+                Ok(Token::new("partial")),
+                Err(crate::error::MycryptoError::LlmRequest(
+                    "network error".to_string(),
+                )),
+            ])))
+        }
+    }
+
+    async fn collect_events(mut rx: mpsc::Receiver<ChatEvent>) -> Vec<ChatEvent> {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
     }
 
     #[tokio::test]
@@ -353,5 +438,62 @@ mod tests {
             .filter(|msg| msg.content == "Hello duplicate check")
             .count();
         assert_eq!(user_occurrences, 1);
+    }
+
+    #[tokio::test]
+    async fn test_process_message_emits_complete_when_stream_ends_without_final_token() {
+        let config = LlmConfig {
+            provider: LlmProviderType::Mock,
+            ..Default::default()
+        };
+        let engine = ChatEngine {
+            provider: Box::new(NoFinalTokenProvider),
+            config,
+        };
+        let state = AppState::new(Config::default());
+
+        let mut rx = engine.process_message(&state, "hi").await.unwrap();
+        let mut saw_complete = false;
+
+        while let Some(event) = rx.recv().await {
+            if let ChatEvent::Complete(text) = event {
+                saw_complete = true;
+                assert_eq!(text, "hello");
+            }
+        }
+
+        assert!(
+            saw_complete,
+            "chat stream without final token must still emit ChatEvent::Complete"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_process_message_emits_error_without_complete_on_stream_error() {
+        let config = LlmConfig {
+            provider: LlmProviderType::Mock,
+            ..Default::default()
+        };
+        let engine = ChatEngine {
+            provider: Box::new(ErrorAfterTokenProvider),
+            config,
+        };
+        let state = AppState::new(Config::default());
+
+        let rx = engine.process_message(&state, "hi").await.unwrap();
+        let events = collect_events(rx).await;
+
+        assert!(
+            events.iter().any(
+                |event| matches!(event, ChatEvent::Error(msg) if msg.contains("network error"))
+            ),
+            "expected stream error event"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, ChatEvent::Complete(_))),
+            "must not emit completion after stream error"
+        );
     }
 }

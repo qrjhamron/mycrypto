@@ -13,8 +13,9 @@ use futures_util::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::time::sleep;
-use tracing::warn;
+use tracing::{debug, warn};
 
+use crate::chat::pipeline::{find_sse_event_end, sse_data_payload};
 use crate::config::LlmConfig;
 use crate::error::{MycryptoError, Result};
 
@@ -74,7 +75,7 @@ struct OpenRouterRequest {
     stream: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct OpenRouterMessage {
     role: String,
     content: String,
@@ -134,22 +135,25 @@ impl LlmProvider for OpenRouterProvider {
             .collect();
 
         // OpenRouter uses provider/model format like "anthropic/claude-3-opus"
-        let model = if config.model.contains('/') {
+        let requested_model = if config.model.contains('/') {
             config.model.clone()
         } else {
             // Default to Claude via OpenRouter
             format!("anthropic/{}", config.model)
         };
 
-        let request = OpenRouterRequest {
-            model,
-            messages: openrouter_messages,
-            max_tokens: config.max_tokens,
-            stream: true,
-        };
+        let mut model = requested_model;
 
         let mut attempt: u8 = 0;
+        let mut used_free_router_fallback = false;
         let response = loop {
+            let request = OpenRouterRequest {
+                model: model.clone(),
+                messages: openrouter_messages.clone(),
+                max_tokens: config.max_tokens,
+                stream: true,
+            };
+
             let response = self
                 .client
                 .post(OPENROUTER_API_URL)
@@ -177,6 +181,19 @@ impl LlmProvider for OpenRouterProvider {
                 body_preview(&body)
             );
 
+            if !used_free_router_fallback {
+                if let Some(fallback_model) = fallback_openrouter_model_for_status(&model, status) {
+                    warn!(
+                        "OpenRouter free model '{}' is unavailable (status {}), retrying with '{}'",
+                        model, status, fallback_model
+                    );
+                    model = fallback_model.to_string();
+                    used_free_router_fallback = true;
+                    attempt = 0;
+                    continue;
+                }
+            }
+
             if (status == 429 || status == 503) && attempt == 0 {
                 attempt += 1;
                 sleep(Duration::from_secs(2)).await;
@@ -197,6 +214,18 @@ impl LlmProvider for OpenRouterProvider {
         let byte_stream = response.bytes_stream();
         Ok(Box::pin(OpenRouterStream::new(byte_stream)))
     }
+}
+
+fn fallback_openrouter_model_for_status(model: &str, status: u16) -> Option<&'static str> {
+    if model == "openrouter/free" {
+        return None;
+    }
+
+    if (status == 429 || status == 503) && model.ends_with(":free") {
+        return Some("openrouter/free");
+    }
+
+    None
 }
 
 fn build_http_client() -> Client {
@@ -224,6 +253,10 @@ fn body_preview(body: &str) -> String {
     } else {
         preview
     }
+}
+
+fn parse_openrouter_chunk(data: &str) -> Option<OpenRouterChunk> {
+    serde_json::from_str::<OpenRouterChunk>(data).ok()
 }
 
 /// Stream that parses OpenRouter SSE events into tokens.
@@ -255,25 +288,35 @@ where
         }
 
         loop {
-            if let Some(event_end) = self.buffer.find("\n\n") {
+            if let Some((event_end, sep_len)) = find_sse_event_end(&self.buffer) {
                 let event_str = self.buffer[..event_end].to_string();
-                self.buffer = self.buffer[event_end + 2..].to_string();
+                self.buffer = self.buffer[event_end + sep_len..].to_string();
+                debug!("OpenRouter stream event parsed ({} chars)", event_str.len());
 
                 for line in event_str.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
+                    if let Some(data) = sse_data_payload(line) {
                         if data == "[DONE]" {
                             self.finished = true;
+                            debug!("OpenRouter stream token emitted: final reason=stop");
                             return Poll::Ready(Some(Ok(Token::final_token("stop"))));
                         }
 
-                        if let Ok(chunk) = serde_json::from_str::<OpenRouterChunk>(data) {
+                        if let Some(chunk) = parse_openrouter_chunk(data) {
                             if let Some(choice) = chunk.choices.first() {
                                 if let Some(reason) = &choice.finish_reason {
                                     self.finished = true;
+                                    debug!(
+                                        "OpenRouter stream token emitted: final reason={}",
+                                        reason
+                                    );
                                     return Poll::Ready(Some(Ok(Token::final_token(reason))));
                                 }
                                 if let Some(content) = &choice.delta.content {
                                     if !content.is_empty() {
+                                        debug!(
+                                            "OpenRouter stream token emitted ({} chars)",
+                                            content.len()
+                                        );
                                         return Poll::Ready(Some(Ok(Token::new(content))));
                                     }
                                 }
@@ -289,6 +332,7 @@ where
 
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
+                debug!("OpenRouter stream chunk received ({} bytes)", bytes.len());
                 if let Ok(text) = String::from_utf8(bytes.to_vec()) {
                     self.buffer.push_str(&text);
                 }
@@ -301,7 +345,8 @@ where
             }
             Poll::Ready(None) => {
                 self.finished = true;
-                Poll::Ready(None)
+                debug!("OpenRouter stream finalized on EOF");
+                Poll::Ready(Some(Ok(Token::final_token("stop"))))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -310,7 +355,34 @@ where
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use futures_util::{stream, StreamExt};
+
     use super::*;
+
+    #[test]
+    fn test_fallback_openrouter_model_for_status_rate_limited_free_model() {
+        assert_eq!(
+            fallback_openrouter_model_for_status("google/gemma-3n-e2b-it:free", 429),
+            Some("openrouter/free")
+        );
+    }
+
+    #[test]
+    fn test_fallback_openrouter_model_for_status_does_not_fallback_for_non_free_model() {
+        assert_eq!(
+            fallback_openrouter_model_for_status("google/gemma-2.0-pro", 429),
+            None
+        );
+    }
+
+    #[test]
+    fn test_fallback_openrouter_model_for_status_does_not_fallback_when_already_router() {
+        assert_eq!(
+            fallback_openrouter_model_for_status("openrouter/free", 429),
+            None
+        );
+    }
 
     #[test]
     fn test_openrouter_provider_creation() {
@@ -322,5 +394,49 @@ mod tests {
     fn test_openrouter_with_api_key() {
         let provider = OpenRouterProvider::with_api_key("test-key");
         assert!(provider.api_key.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_openrouter_stream_parses_crlf_and_data_prefix_without_space() {
+        let chunk = "data:{\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\r\n\r\n";
+        let inner = stream::iter(vec![Ok(Bytes::from(chunk))]);
+        let mut stream = OpenRouterStream::new(inner);
+
+        let token = stream.next().await;
+        assert!(token.is_some(), "expected at least one token");
+        let token = token.unwrap().unwrap();
+        assert_eq!(token.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_openrouter_stream_parses_data_prefix_with_space() {
+        let chunk =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n";
+        let inner = stream::iter(vec![Ok(Bytes::from(chunk))]);
+        let mut stream = OpenRouterStream::new(inner);
+
+        let token = stream.next().await.expect("token event").expect("token");
+        assert_eq!(token.text, "hi");
+    }
+
+    #[tokio::test]
+    async fn test_openrouter_stream_emits_final_token_on_eof_without_done() {
+        let chunk =
+            "data:{\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n";
+        let inner = stream::iter(vec![Ok(Bytes::from(chunk))]);
+        let mut stream = OpenRouterStream::new(inner);
+
+        let mut saw_final = false;
+        while let Some(result) = stream.next().await {
+            let token = result.unwrap();
+            if token.is_final {
+                saw_final = true;
+            }
+        }
+
+        assert!(
+            saw_final,
+            "stream should emit a final token when upstream closes cleanly"
+        );
     }
 }

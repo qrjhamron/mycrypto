@@ -12,6 +12,7 @@ pub mod context;
 pub mod engine;
 pub mod intent;
 pub mod llm;
+pub mod pipeline;
 pub mod team;
 
 // Re-export commonly used items

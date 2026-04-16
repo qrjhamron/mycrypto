@@ -10,7 +10,9 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
+use crate::chat::pipeline::{find_sse_event_end, sse_data_payload};
 use crate::config::LlmConfig;
 use crate::error::{MycryptoError, Result};
 
@@ -90,6 +92,10 @@ impl Default for CopilotProvider {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn parse_copilot_chunk(data: &str) -> Option<CopilotChunk> {
+    serde_json::from_str::<CopilotChunk>(data).ok()
 }
 
 /// Copilot token response.
@@ -230,25 +236,32 @@ where
         }
 
         loop {
-            if let Some(event_end) = self.buffer.find("\n\n") {
+            if let Some((event_end, sep_len)) = find_sse_event_end(&self.buffer) {
                 let event_str = self.buffer[..event_end].to_string();
-                self.buffer = self.buffer[event_end + 2..].to_string();
+                self.buffer = self.buffer[event_end + sep_len..].to_string();
+                debug!("Copilot stream event parsed ({} chars)", event_str.len());
 
                 for line in event_str.lines() {
-                    if let Some(data) = line.strip_prefix("data: ") {
+                    if let Some(data) = sse_data_payload(line) {
                         if data == "[DONE]" {
                             self.finished = true;
+                            debug!("Copilot stream token emitted: final reason=stop");
                             return Poll::Ready(Some(Ok(Token::final_token("stop"))));
                         }
 
-                        if let Ok(chunk) = serde_json::from_str::<CopilotChunk>(data) {
+                        if let Some(chunk) = parse_copilot_chunk(data) {
                             if let Some(choice) = chunk.choices.first() {
                                 if let Some(reason) = &choice.finish_reason {
                                     self.finished = true;
+                                    debug!("Copilot stream token emitted: final reason={}", reason);
                                     return Poll::Ready(Some(Ok(Token::final_token(reason))));
                                 }
                                 if let Some(content) = &choice.delta.content {
                                     if !content.is_empty() {
+                                        debug!(
+                                            "Copilot stream token emitted ({} chars)",
+                                            content.len()
+                                        );
                                         return Poll::Ready(Some(Ok(Token::new(content))));
                                     }
                                 }
@@ -264,6 +277,7 @@ where
 
         match Pin::new(&mut self.inner).poll_next(cx) {
             Poll::Ready(Some(Ok(bytes))) => {
+                debug!("Copilot stream chunk received ({} bytes)", bytes.len());
                 if let Ok(text) = String::from_utf8(bytes.to_vec()) {
                     self.buffer.push_str(&text);
                 }
@@ -276,7 +290,8 @@ where
             }
             Poll::Ready(None) => {
                 self.finished = true;
-                Poll::Ready(None)
+                debug!("Copilot stream finalized on EOF");
+                Poll::Ready(Some(Ok(Token::final_token("stop"))))
             }
             Poll::Pending => Poll::Pending,
         }
@@ -285,6 +300,9 @@ where
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+    use futures_util::{stream, StreamExt};
+
     use super::*;
 
     #[test]
@@ -297,5 +315,49 @@ mod tests {
     fn test_copilot_with_token() {
         let provider = CopilotProvider::with_token("test-token");
         assert!(provider.github_token.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_copilot_stream_parses_crlf_and_data_prefix_without_space() {
+        let chunk = "data:{\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\r\n\r\n";
+        let inner = stream::iter(vec![Ok(Bytes::from(chunk))]);
+        let mut stream = CopilotStream::new(inner);
+
+        let token = stream.next().await;
+        assert!(token.is_some(), "expected at least one token");
+        let token = token.unwrap().unwrap();
+        assert_eq!(token.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn test_copilot_stream_parses_data_prefix_with_space() {
+        let chunk =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n";
+        let inner = stream::iter(vec![Ok(Bytes::from(chunk))]);
+        let mut stream = CopilotStream::new(inner);
+
+        let token = stream.next().await.expect("token event").expect("token");
+        assert_eq!(token.text, "hi");
+    }
+
+    #[tokio::test]
+    async fn test_copilot_stream_emits_final_token_on_eof_without_done() {
+        let chunk =
+            "data:{\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n";
+        let inner = stream::iter(vec![Ok(Bytes::from(chunk))]);
+        let mut stream = CopilotStream::new(inner);
+
+        let mut saw_final = false;
+        while let Some(result) = stream.next().await {
+            let token = result.unwrap();
+            if token.is_final {
+                saw_final = true;
+            }
+        }
+
+        assert!(
+            saw_final,
+            "stream should emit a final token when upstream closes cleanly"
+        );
     }
 }

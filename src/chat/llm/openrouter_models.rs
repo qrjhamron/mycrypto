@@ -40,8 +40,13 @@ fn extract_free_models(response: OpenRouterModelsResponse) -> Vec<String> {
         .into_iter()
         .filter_map(|entry| {
             let pricing = entry.pricing?;
-            if pricing.prompt.trim() == "0" && pricing.completion.trim() == "0" {
-                Some(entry.id)
+            let id = entry.id;
+            let id_is_free_variant = id.ends_with(":free") || id == "openrouter/free";
+            if id_is_free_variant
+                && pricing.prompt.trim() == "0"
+                && pricing.completion.trim() == "0"
+            {
+                Some(id)
             } else {
                 None
             }
@@ -90,18 +95,56 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_free_models_filters_by_exact_zero_pricing() {
+    fn test_extract_free_models_requires_explicit_free_model_id() {
         let response = OpenRouterModelsResponse {
             data: vec![
                 OpenRouterModelEntry {
-                    id: "openrouter/free-1".to_string(),
+                    id: "google/gemma-3n-e2b-it".to_string(),
                     pricing: Some(OpenRouterModelPricing {
                         prompt: "0".to_string(),
                         completion: "0".to_string(),
                     }),
                 },
                 OpenRouterModelEntry {
-                    id: "openrouter/free-2".to_string(),
+                    id: "google/gemma-3n-e2b-it:free".to_string(),
+                    pricing: Some(OpenRouterModelPricing {
+                        prompt: "0".to_string(),
+                        completion: "0".to_string(),
+                    }),
+                },
+                OpenRouterModelEntry {
+                    id: "openrouter/free".to_string(),
+                    pricing: Some(OpenRouterModelPricing {
+                        prompt: "0".to_string(),
+                        completion: "0".to_string(),
+                    }),
+                },
+            ],
+        };
+
+        let result = extract_free_models(response);
+        assert_eq!(
+            result,
+            vec![
+                "google/gemma-3n-e2b-it:free".to_string(),
+                "openrouter/free".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extract_free_models_filters_by_exact_zero_pricing() {
+        let response = OpenRouterModelsResponse {
+            data: vec![
+                OpenRouterModelEntry {
+                    id: "openrouter/free-1:free".to_string(),
+                    pricing: Some(OpenRouterModelPricing {
+                        prompt: "0".to_string(),
+                        completion: "0".to_string(),
+                    }),
+                },
+                OpenRouterModelEntry {
+                    id: "openrouter/free-2:free".to_string(),
                     pricing: Some(OpenRouterModelPricing {
                         prompt: "0".to_string(),
                         completion: "0".to_string(),
@@ -119,7 +162,7 @@ mod tests {
                     pricing: None,
                 },
                 OpenRouterModelEntry {
-                    id: "openrouter/free-1".to_string(),
+                    id: "openrouter/free-1:free".to_string(),
                     pricing: Some(OpenRouterModelPricing {
                         prompt: "0".to_string(),
                         completion: "0".to_string(),
@@ -132,8 +175,8 @@ mod tests {
         assert_eq!(
             result,
             vec![
-                "openrouter/free-1".to_string(),
-                "openrouter/free-2".to_string()
+                "openrouter/free-1:free".to_string(),
+                "openrouter/free-2:free".to_string()
             ]
         );
     }

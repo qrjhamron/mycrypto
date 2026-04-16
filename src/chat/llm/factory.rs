@@ -5,6 +5,7 @@
 
 use tracing::{info, warn};
 
+use crate::chat::pipeline::ProviderRoute;
 use crate::config::{LlmConfig, LlmProvider as LlmProviderType};
 
 use super::claude::ClaudeProvider;
@@ -21,13 +22,21 @@ use super::provider::LlmProvider;
 /// If the configured provider lacks credentials, automatically falls back
 /// to the mock provider with a warning log.
 pub fn create_provider(config: &LlmConfig) -> Box<dyn LlmProvider> {
-    let selection_reason = provider_selection_reason(config);
+    let selection_reason = crate::chat::pipeline::provider_selection_reason(config);
     info!(
         "LLM provider requested: {} (reason: {})",
         config.provider, selection_reason
     );
 
     let provider = create_provider_for_type(&config.provider);
+    let route = ProviderRoute::from_config(config, provider.name(), provider.has_credentials());
+    info!(
+        requested = %route.requested_provider,
+        selected = %route.selected_provider,
+        has_credentials = route.has_credentials,
+        reason = %route.selection_reason,
+        "LLM route decision"
+    );
 
     // Check if provider has valid credentials
     if !provider.has_credentials() {
@@ -82,40 +91,6 @@ pub fn get_env_var_name(provider_type: &LlmProviderType) -> &'static str {
         LlmProviderType::Gradio => "GRADIO_API_KEY",
         LlmProviderType::Copilot => "GITHUB_TOKEN",
         LlmProviderType::Mock => "",
-    }
-}
-
-fn provider_selection_reason(config: &LlmConfig) -> String {
-    if !config.api_key.is_empty() && !config.api_key.starts_with("ENV:") {
-        return "config.api_key override".to_string();
-    }
-
-    match config.provider {
-        LlmProviderType::Claude => env_state("CLAUDE_API_KEY"),
-        LlmProviderType::OpenAI => env_state("OPENAI_API_KEY"),
-        LlmProviderType::Gemini => {
-            let gemini = env_state("GEMINI_API_KEY");
-            if gemini.starts_with("found") {
-                return format!("{} (preferred)", gemini);
-            }
-            let google = env_state("GOOGLE_API_KEY");
-            if google.starts_with("found") {
-                return format!("{} (fallback)", google);
-            }
-            format!("{}; {}", gemini, google)
-        }
-        LlmProviderType::OpenRouter => env_state("OPENROUTER_API_KEY"),
-        LlmProviderType::Gradio => env_state("GRADIO_API_KEY"),
-        LlmProviderType::Copilot => env_state("GITHUB_TOKEN"),
-        LlmProviderType::Mock => "mock provider explicitly configured".to_string(),
-    }
-}
-
-fn env_state(var: &str) -> String {
-    match std::env::var(var) {
-        Ok(v) if v.trim().is_empty() => format!("{} is set but empty", var),
-        Ok(_) => format!("found {}", var),
-        Err(_) => format!("missing {}", var),
     }
 }
 

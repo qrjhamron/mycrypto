@@ -950,6 +950,14 @@ impl AppState {
             }
             StateUpdate::ChatError(error) => {
                 self.is_agent_thinking = false;
+                if let Some(msg) = self.chat_messages.back_mut() {
+                    if !msg.is_user {
+                        msg.is_streaming = false;
+                        if msg.content.is_empty() {
+                            msg.content = format!("Error: {}", error);
+                        }
+                    }
+                }
                 self.add_log(LogEntry::error(format!("Chat error: {}", error)));
             }
             StateUpdate::TeamSessionStarted { prompt, session_id } => {
@@ -1877,6 +1885,23 @@ mod tests {
         assert!(!state.is_agent_thinking);
         let agent_msg = &state.chat_messages[1];
         assert_eq!(agent_msg.content, "Hi there!");
+    }
+
+    #[test]
+    fn test_chat_error_is_rendered_in_assistant_message() {
+        let mut state = AppState::new(test_config());
+
+        state.send_user_message("Hello".to_string());
+        state.apply_update(StateUpdate::ChatError("provider timeout".to_string()));
+
+        assert!(!state.is_agent_thinking);
+        let assistant_msg = state
+            .chat_messages
+            .back()
+            .expect("assistant placeholder should exist");
+        assert!(!assistant_msg.is_user);
+        assert!(!assistant_msg.is_streaming);
+        assert!(assistant_msg.content.contains("provider timeout"));
     }
 
     #[test]
